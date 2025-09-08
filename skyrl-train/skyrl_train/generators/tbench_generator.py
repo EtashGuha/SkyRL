@@ -35,11 +35,85 @@ import os
 import hashlib
 from sandbox.models.trial.config import TrialConfig, EnvironmentConfig, AgentConfig, LocalTaskConfig
 from sandbox.models.environment_type import EnvironmentType
+import aiohttp
+import asyncio
+from aiohttp_socks import ProxyConnector
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 TP_SIZE = 1
 SERVER_PORT = 8000
 SERVER_HOST = "127.0.0.1"
+
+# Add this to your code where the environment variables are being printed
+import subprocess
+import socket
+def configure_daytona_for_socks():
+    print("=== Configuring Daytona for SOCKS proxy ===")
+    
+    # Create a custom connector for SOCKS proxy
+    connector = ProxyConnector.from_url('socks5://localhost:7003')
+    
+    # Set longer timeouts for aiohttp
+    timeout = aiohttp.ClientTimeout(
+        total=1800,  # 30 minutes total
+        connect=300,  # 5 minutes to connect
+        sock_read=900,  # 15 minutes for socket read
+        sock_connect=300  # 5 minutes for socket connect
+    )
+    
+    # Configure aiohttp session
+    session = aiohttp.ClientSession(
+        connector=connector,
+        timeout=timeout,
+        trust_env=True  # Use environment proxy settings
+    )
+    
+    return session
+
+
+
+def test_tunnel_connectivity():
+    print("=== Testing SSH Tunnel Connectivity ===")
+    
+    # Test if port 7003 is listening
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        result = sock.connect_ex(('localhost', 7003))
+        sock.close()
+        if result == 0:
+            print("Port 7003 is accessible")
+        else:
+            print(f"Port 7003 is NOT accessible (error code: {result})")
+    except Exception as e:
+        print(f"Socket test failed: {e}")
+    
+    # Test SSH tunnel process
+    try:
+        result = subprocess.run(['ps', 'aux'], capture_output=True, text=True)
+        ssh_processes = [line for line in result.stdout.split('\n') if 'ssh' in line and '7003' in line]
+        if ssh_processes:
+            print("SSH tunnel processes found:")
+            for proc in ssh_processes:
+                print(f"  {proc}")
+        else:
+            print("No SSH tunnel processes found")
+    except Exception as e:
+        print(f"Process check failed: {e}")
+    
+    # Test actual connectivity through tunnel
+    try:
+        import requests
+        import urllib3
+        urllib3.disable_warnings()
+        
+        proxies = {'http': 'socks5://localhost:7003', 'https': 'socks5://localhost:7003'}
+        response = requests.get('https://httpbin.org/ip', proxies=proxies, timeout=10, verify=False)
+        print(f"Tunnel connectivity test: SUCCESS - {response.json()}")
+    except Exception as e:
+        print(f"Tunnel connectivity test: FAILED - {e}")
+    
+    print("=== End Tunnel Connectivity Test ===")
+
 
 class TBenchGenerator(SkyRLGymGenerator):
     def __init__(
@@ -97,7 +171,19 @@ class TBenchGenerator(SkyRLGymGenerator):
             prompt_token_ids: List[int]
         """        
         trials_dir = self.generator_cfg.get("trial_runs_dir")
+        import os
+        print("=== Environment Variables in Ray Remote Context ===")
+        proxy_vars = ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 
+                    'DAYTONA_API_KEY', 'DAYTONA_TIMEOUT', 'AIOHTTP_CLIENT_TIMEOUT']
+        for var in proxy_vars:
+            print(f"{var}: {os.environ.get(var, 'NOT SET')}")
+        print("=== End Environment Variables ===")
 
+
+        # Call this in your Ray remote function
+        test_tunnel_connectivity()
+        # Use this before creating Daytona client
+        session = configure_daytona_for_socks()
         if self.generator_cfg.get("agent_name") == "terminus":
             self.trial_config = TrialConfig(
                 task=LocalTaskConfig(id=LocalTaskId(path=f"{self.generator_cfg.get('sandboxes_dir')}/examples/tasks/hello-world")),
